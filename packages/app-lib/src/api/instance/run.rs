@@ -244,6 +244,9 @@ async fn run_credentials(
 
     if let Some(project_id) = server_play_project_id(&context.link)
         && !project_id.trim().is_empty()
+        // Offline accounts have no session to join with; servers that do not
+        // check authentication accept them regardless.
+        && !credentials.is_offline()
     {
         let server_id = uuid::Uuid::new_v4().to_string();
         let join_result = fetch::INSECURE_REQWEST_CLIENT

@@ -260,6 +260,17 @@ pub enum UrlOrBlob {
     Blob(Bytes),
 }
 
+/// Rejects skin and cape mutations for offline accounts, which have no
+/// online profile to save skins to.
+fn require_microsoft_account(credentials: &Credentials) -> crate::Result<()> {
+    if credentials.is_offline() {
+        Err(ErrorKind::InputError(
+            "Skins require a signed-in Microsoft account".to_string(),
+        ))?;
+    }
+    Ok(())
+}
+
 /// Gets the capes for the selected Minecraft profile.
 /// Only one cape can be equipped.
 #[tracing::instrument]
@@ -539,6 +550,7 @@ pub async fn add_and_equip_custom_skin(
     let selected_credentials = Credentials::get_default_credential(&state.pool)
         .await?
         .ok_or(ErrorKind::NoCredentialsError)?;
+    require_microsoft_account(&selected_credentials)?;
     let cape_id = cape.map(|cape| cape.id);
     let local_texture_key = local_skin_texture_key(&texture_blob);
 
@@ -696,6 +708,7 @@ pub async fn equip_skin(skin: Skin) -> crate::Result<()> {
     let selected_credentials = Credentials::get_default_credential(&state.pool)
         .await?
         .ok_or(ErrorKind::NoCredentialsError)?;
+    require_microsoft_account(&selected_credentials)?;
 
     set_pending_skin_change(PendingSkinChange::Equip {
         selected_credentials,
@@ -843,6 +856,7 @@ pub async fn remove_custom_skin(skin: Skin) -> crate::Result<()> {
     let selected_credentials = Credentials::get_default_credential(&state.pool)
         .await?
         .ok_or(ErrorKind::NoCredentialsError)?;
+    require_microsoft_account(&selected_credentials)?;
 
     CustomMinecraftSkin {
         texture_key: skin.texture_key.to_string(),
@@ -872,6 +886,7 @@ pub async fn set_custom_skin_order(
     let selected_credentials = Credentials::get_default_credential(&state.pool)
         .await?
         .ok_or(ErrorKind::NoCredentialsError)?;
+    require_microsoft_account(&selected_credentials)?;
 
     CustomMinecraftSkin::set_order(
         selected_credentials.offline_profile.id,
@@ -903,6 +918,7 @@ pub async fn save_custom_skin(
     let selected_credentials = Credentials::get_default_credential(&state.pool)
         .await?
         .ok_or(ErrorKind::NoCredentialsError)?;
+    require_microsoft_account(&selected_credentials)?;
 
     let old_texture_key = Arc::clone(&skin.texture_key);
     let texture_key = if replace_texture {
@@ -980,6 +996,7 @@ pub async fn unequip_skin() -> crate::Result<()> {
     let selected_credentials = Credentials::get_default_credential(&state.pool)
         .await?
         .ok_or(ErrorKind::NoCredentialsError)?;
+    require_microsoft_account(&selected_credentials)?;
 
     set_pending_skin_change(PendingSkinChange::Unequip {
         selected_credentials,

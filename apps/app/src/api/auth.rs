@@ -13,6 +13,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             get_default_user,
             set_default_user,
             get_users,
+            create_offline_user,
+            rename_offline_user,
         ])
         .build()
 }
@@ -105,4 +107,21 @@ pub async fn set_default_user(user: uuid::Uuid) -> Result<()> {
 #[tauri::command]
 pub async fn get_users() -> Result<Vec<Credentials>> {
     Ok(minecraft_auth::users().await?)
+}
+
+/// Create a new offline account with the given display name, make it the
+/// active account, and return its credentials. Works with no network access.
+#[tauri::command]
+pub async fn create_offline_user(name: String) -> Result<Credentials> {
+    Ok(minecraft_auth::create_offline_user(&name).await?)
+}
+
+/// Rename an offline account. Renaming recomputes the deterministic UUID, so
+/// the renamed account is a new identity.
+#[tauri::command]
+pub async fn rename_offline_user(
+    uuid: uuid::Uuid,
+    new_name: String,
+) -> Result<Credentials> {
+    Ok(minecraft_auth::rename_offline_user(uuid, &new_name).await?)
 }

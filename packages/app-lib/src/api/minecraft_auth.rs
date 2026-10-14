@@ -47,6 +47,42 @@ pub async fn finish_login(
     Ok(credentials)
 }
 
+/// Create a new offline account with the given display name, make it the
+/// active account, and return its credentials.
+///
+/// Offline accounts have no Microsoft tokens and work with no network access.
+/// They can play single-player and join servers that do not check for
+/// authentication (`online-mode=false`).
+#[tracing::instrument]
+pub async fn create_offline_user(name: &str) -> crate::Result<Credentials> {
+    let state = State::get().await?;
+
+    let credentials =
+        Credentials::create_offline_user(name, &state.pool).await?;
+
+    if let Err(error) =
+        crate::onboarding_checklist::mark_logged_into_minecraft().await
+    {
+        tracing::warn!(
+            "Failed to mark Minecraft login in onboarding checklist: {error}"
+        );
+    }
+
+    Ok(credentials)
+}
+
+/// Rename an offline account. Renaming recomputes the deterministic UUID, so
+/// the renamed account is a new identity.
+#[tracing::instrument]
+pub async fn rename_offline_user(
+    uuid: uuid::Uuid,
+    new_name: &str,
+) -> crate::Result<Credentials> {
+    let state = State::get().await?;
+
+    Credentials::rename_offline_user(uuid, new_name, &state.pool).await
+}
+
 #[tracing::instrument]
 pub async fn get_default_user() -> crate::Result<Option<uuid::Uuid>> {
     let state = State::get().await?;
