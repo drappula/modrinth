@@ -76,14 +76,16 @@ Migration (new file, e.g.
 
 ```sql
 ALTER TABLE minecraft_users ADD COLUMN account_type TEXT NOT NULL DEFAULT 'microsoft';
--- Make network credentials nullable for offline rows:
--- SQLite requires table rebuild for NOT NULL → nullable changes; do the
--- standard rename-copy-drop if needed, preserving all rows.
 ```
 
 - `account_type`: `'microsoft'` (default, existing rows) | `'offline'`.
-- `access_token`, `refresh_token`, `expires`: nullable; NULL for offline rows.
-- Update `.sqlx` checked-query JSON files for every touched query.
+- `access_token`, `refresh_token`, `expires` stay `NOT NULL`; offline rows
+  store sentinel values (`''`, `''`, `0`). This deliberately avoids a table
+  rebuild, which would drop the `AFTER UPDATE OF uuid ON minecraft_users`
+  triggers owned by the skin-selector migration. All consumers branch on
+  `account_type` and never read tokens for offline rows.
+- Update `.sqlx` checked-query JSON files for every touched query (regenerate
+  with `cargo sqlx prepare` against a migrated scratch DB).
 - Validation of the migration: existing rows unchanged, new column defaults
   correctly, offline rows insert/select round-trip.
 
