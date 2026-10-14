@@ -50,6 +50,27 @@ export async function set_default_user(user) {
 }
 
 /**
+ * Creates a new offline account with the given display name, makes it the
+ * active account, and returns its credentials. Works with no network access.
+ * @param {string} name
+ * @returns {Promise<Credential>}
+ */
+export async function create_offline_user(name) {
+	return await invoke('plugin:auth|create_offline_user', { name })
+}
+
+/**
+ * Renames an offline account. Renaming recomputes the deterministic UUID, so
+ * the renamed account is a new identity.
+ * @param {UUID} uuid
+ * @param {string} new_name
+ * @returns {Promise<Credential>}
+ */
+export async function rename_offline_user(uuid, new_name) {
+	return await invoke('plugin:auth|rename_offline_user', { uuid, new_name })
+}
+
+/**
  * Remove a user account from the database
  * @param {UUID} user
  */

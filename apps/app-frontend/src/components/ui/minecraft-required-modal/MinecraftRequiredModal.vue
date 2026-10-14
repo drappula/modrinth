@@ -43,6 +43,12 @@
 					{{ formatMessage(messages.signIn) }}
 				</Button>
 			</div>
+			<Button @click="continueOffline">
+				{{ formatMessage(messages.continueOffline) }}
+			</Button>
+			<p class="m-0 text-center text-sm text-secondary">
+				{{ formatMessage(messages.offlineNote) }}
+			</p>
 			<p class="m-0 text-center text-sm text-secondary">
 				{{ formatMessage(messages.dontHaveAccount) }}
 				<a
@@ -92,6 +98,15 @@ const messages = defineMessages({
 		id: 'minecraft-required.sign-in',
 		defaultMessage: 'Sign in to Microsoft',
 	},
+	continueOffline: {
+		id: 'minecraft-required.continue-offline',
+		defaultMessage: 'Continue offline',
+	},
+	offlineNote: {
+		id: 'minecraft-required.offline-note',
+		defaultMessage:
+			'Playing offline uses a custom username without a Microsoft account. Single-player and servers without authentication checks work; servers with online-mode enabled will reject you.',
+	},
 	dontHaveAccount: {
 		id: 'minecraft-required.dont-have-account',
 		defaultMessage: 'Don’t have an account?',
@@ -125,6 +140,11 @@ async function signIn() {
 	} finally {
 		loadingSignIn.value = false
 	}
+}
+
+function continueOffline() {
+	modal.value?.hide()
+	accountsCard.value?.openOfflineModal()
 }
 
 defineExpose({

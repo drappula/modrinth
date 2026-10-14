@@ -9,6 +9,9 @@
 			<SpinnerIcon v-else class="animate-spin" />
 			{{ formatMessage(messages.signInToMinecraft) }}
 		</Button>
+		<Button :disabled="loginDisabled" @click="openOfflineModal()">
+			{{ formatMessage(messages.playOffline) }}
+		</Button>
 	</div>
 	<Accordion
 		v-else
@@ -57,7 +60,23 @@
 						>
 							{{ account.profile.name }}
 						</p>
+						<span
+							v-if="account.account_type === 'offline'"
+							class="shrink-0 rounded-full bg-surface-5 px-2 py-0.5 text-xs text-secondary"
+						>
+							{{ formatMessage(messages.offlineBadge) }}
+						</span>
 					</button>
+					<IconButton
+						v-if="account.account_type === 'offline'"
+						v-tooltip="formatMessage(messages.renameAccount)"
+						type="quiet"
+						:label="formatMessage(messages.renameAccount)"
+						class="mr-1 !bg-button-bg !text-primary ![box-shadow:var(--shadow-button)]"
+						@click="openOfflineModal(account)"
+					>
+						<EditIcon />
+					</IconButton>
 					<IconButton
 						v-tooltip="formatMessage(messages.removeAccount)"
 						type="quiet"
@@ -80,13 +99,67 @@
 					<PlusIcon />
 					{{ formatMessage(messages.addAccount) }}
 				</Button>
+				<Button
+					v-if="accounts.length > 0"
+					class="w-full !bg-button-bg !text-primary ![box-shadow:var(--shadow-button)]"
+					:disabled="loginDisabled"
+					@click="openOfflineModal()"
+				>
+					<PlusIcon />
+					{{ formatMessage(messages.playOffline) }}
+				</Button>
 			</div>
 		</div>
 	</Accordion>
+	<NewModal
+		ref="offlineModal"
+		:header="
+			renameTarget
+				? formatMessage(messages.renameOfflineHeader)
+				: formatMessage(messages.createOfflineHeader)
+		"
+		max-width="420px"
+	>
+		<div class="flex flex-col gap-3">
+			<div class="labeled_input w-full">
+				<p class="text-contrast font-semibold">{{ formatMessage(messages.offlineNameLabel) }}</p>
+				<Input
+					v-model="offlineName"
+					type="text"
+					:placeholder="formatMessage(messages.offlineNamePlaceholder)"
+					clearable
+					wrapper-class="w-full"
+					@keydown.enter="submitOfflineModal"
+				/>
+			</div>
+			<p v-if="offlineError" class="m-0 text-sm text-red">
+				{{ offlineError }}
+			</p>
+			<p v-if="renameTarget" class="m-0 text-sm text-secondary">
+				{{ formatMessage(messages.renameOfflineNote) }}
+			</p>
+			<div class="flex gap-2">
+				<Button class="flex-1" @click="offlineModal?.hide()">
+					{{ formatMessage(messages.cancel) }}
+				</Button>
+				<Button
+					type="colored"
+					color="brand"
+					class="flex-1"
+					:disabled="!isOfflineNameValid || offlineSaving"
+					@click="submitOfflineModal"
+				>
+					<SpinnerIcon v-if="offlineSaving" class="animate-spin" />
+					{{ renameTarget ? formatMessage(messages.rename) : formatMessage(messages.create) }}
+				</Button>
+			</div>
+		</div>
+	</NewModal>
 </template>
 
 <script setup lang="ts">
 import {
+	EditIcon,
 	LogInIcon,
 	PlusIcon,
 	RadioButtonCheckedIcon,
@@ -101,6 +174,8 @@ import {
 	defineMessages,
 	IconButton,
 	injectNotificationManager,
+	Input,
+	NewModal,
 	useVIntl,
 } from '@modrinth/ui'
 import type { Ref } from 'vue'
@@ -110,9 +185,11 @@ import { useAppEvent } from '@/composables/use-app-event'
 import { handleSevereError } from '@/composables/use-error.js'
 import { trackEvent } from '@/helpers/analytics'
 import {
+	create_offline_user,
 	get_default_user,
 	login as login_flow,
 	remove_user,
+	rename_offline_user,
 	set_default_user,
 	users,
 } from '@/helpers/auth'
@@ -128,17 +205,26 @@ const emit = defineEmits<{
 }>()
 
 type MinecraftCredential = {
+	account_type?: 'microsoft' | 'offline'
 	profile: {
 		id: string
 		name: string
 	}
 }
 
+const STEVE_HEAD_URL = 'https://launcher-files.modrinth.com/assets/steve_head.png'
+const OFFLINE_NAME_PATTERN = /^[A-Za-z0-9_]{3,16}$/
+
 const accounts: Ref<MinecraftCredential[]> = ref([])
 const loginDisabled = ref(false)
 const defaultUser = ref<string | undefined>()
 const equippedSkin = ref<Skin | null>(null)
 const equippedHeadUrl = ref<string>()
+const offlineModal = ref<InstanceType<typeof NewModal>>()
+const offlineName = ref('')
+const offlineError = ref('')
+const offlineSaving = ref(false)
+const renameTarget = ref<MinecraftCredential | null>(null)
 let headRequest = 0
 
 async function updateHeadUrl(skin: Skin | null) {
@@ -193,6 +279,7 @@ defineExpose({
 	setLoginDisabled,
 	login,
 	loginDisabled,
+	openOfflineModal,
 })
 
 await refreshValues()
@@ -202,6 +289,9 @@ const selectedAccount = computed(() =>
 )
 
 const avatarUrl = computed(() => {
+	if (selectedAccount.value?.account_type === 'offline') {
+		return STEVE_HEAD_URL
+	}
 	if (equippedSkin.value?.texture_key) {
 		const cachedUrl = equippedHeadUrl.value
 		if (cachedUrl) {
@@ -212,10 +302,13 @@ const avatarUrl = computed(() => {
 	if (selectedAccount.value?.profile?.id) {
 		return `https://mc-heads.net/avatar/${selectedAccount.value.profile.id}/128`
 	}
-	return 'https://launcher-files.modrinth.com/assets/steve_head.png'
+	return STEVE_HEAD_URL
 })
 
 function getAccountAvatarUrl(account: MinecraftCredential) {
+	if (account.account_type === 'offline') {
+		return STEVE_HEAD_URL
+	}
 	if (
 		account.profile.id === selectedAccount.value?.profile?.id &&
 		equippedSkin.value?.texture_key
@@ -258,6 +351,36 @@ async function logout(id: string) {
 	trackEvent('AccountLogOut')
 }
 
+const isOfflineNameValid = computed(() => OFFLINE_NAME_PATTERN.test(offlineName.value.trim()))
+
+function openOfflineModal(account?: MinecraftCredential) {
+	renameTarget.value = account ?? null
+	offlineName.value = account?.profile.name ?? ''
+	offlineError.value = ''
+	offlineModal.value?.show()
+}
+
+async function submitOfflineModal() {
+	const name = offlineName.value.trim()
+	if (!OFFLINE_NAME_PATTERN.test(name)) {
+		offlineError.value = formatMessage(messages.offlineNameInvalid)
+		return
+	}
+	offlineSaving.value = true
+	try {
+		const credential = renameTarget.value
+			? await rename_offline_user(renameTarget.value.profile.id, name)
+			: await create_offline_user(name)
+		offlineModal.value?.hide()
+		await setAccount(credential)
+		trackEvent('AccountLogIn', { source: 'OfflineAccount' })
+	} catch (error) {
+		offlineError.value = error instanceof Error ? error.message : String(error)
+	} finally {
+		offlineSaving.value = false
+	}
+}
+
 useAppEvent('process', async (e) => {
 	if (e.event === 'launched') {
 		await refreshValues()
@@ -288,6 +411,55 @@ const messages = defineMessages({
 	signInToMinecraft: {
 		id: 'minecraft-account.sign-in',
 		defaultMessage: 'Sign in to Minecraft',
+	},
+	playOffline: {
+		id: 'minecraft-account.play-offline',
+		defaultMessage: 'Play offline',
+	},
+	offlineBadge: {
+		id: 'minecraft-account.offline-badge',
+		defaultMessage: 'Offline',
+	},
+	renameAccount: {
+		id: 'minecraft-account.rename-account',
+		defaultMessage: 'Rename account',
+	},
+	createOfflineHeader: {
+		id: 'minecraft-account.create-offline-header',
+		defaultMessage: 'Play offline',
+	},
+	renameOfflineHeader: {
+		id: 'minecraft-account.rename-offline-header',
+		defaultMessage: 'Rename offline account',
+	},
+	offlineNameLabel: {
+		id: 'minecraft-account.offline-name-label',
+		defaultMessage: 'Username',
+	},
+	offlineNamePlaceholder: {
+		id: 'minecraft-account.offline-name-placeholder',
+		defaultMessage: 'e.g. Alex_01',
+	},
+	offlineNameInvalid: {
+		id: 'minecraft-account.offline-name-invalid',
+		defaultMessage: 'Use 3-16 letters, numbers, or underscores.',
+	},
+	renameOfflineNote: {
+		id: 'minecraft-account.rename-offline-note',
+		defaultMessage:
+			'Renaming creates a new identity with a different player UUID. Worlds and servers will treat it as a different player.',
+	},
+	cancel: {
+		id: 'minecraft-account.cancel',
+		defaultMessage: 'Cancel',
+	},
+	rename: {
+		id: 'minecraft-account.rename',
+		defaultMessage: 'Rename',
+	},
+	create: {
+		id: 'minecraft-account.create',
+		defaultMessage: 'Create',
 	},
 })
 </script>

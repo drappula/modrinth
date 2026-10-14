@@ -821,7 +821,10 @@ async function loadCurrentUser() {
 		currentUserId.value = defaultId
 
 		const allAccounts = await users()
-		currentUser.value = allAccounts.find((acc) => acc.profile.id === defaultId)
+		const found = allAccounts.find((acc) => acc.profile.id === defaultId)
+		// Offline accounts have no online profile to save skins to: fall back
+		// to the signed-out state with editing disabled.
+		currentUser.value = found?.account_type === 'offline' ? undefined : found
 	} catch (e) {
 		handleError(e as Error)
 		currentUser.value = undefined
