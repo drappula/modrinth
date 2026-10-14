@@ -169,6 +169,7 @@ pub async fn login_finish(
     minecraft_entitlements(&minecraft_token.access_token).await?;
 
     let mut credentials = Credentials {
+        account_type: MinecraftAccountType::Microsoft,
         offline_profile: MinecraftProfile::default(),
         access_token: minecraft_token.access_token,
         refresh_token: oauth_token.value.refresh_token,
@@ -199,6 +200,9 @@ pub async fn login_finish(
 
 #[derive(Deserialize, Debug)]
 pub struct Credentials {
+    /// Whether these credentials are for an offline account, which has no
+    /// Microsoft tokens and works with no network access.
+    pub account_type: MinecraftAccountType,
     /// The offline profile of the user these credentials are for.
     ///
     /// Such a profile can only be relied upon to have a proper player UUID, which is
@@ -210,6 +214,52 @@ pub struct Credentials {
     pub refresh_token: String,
     pub expires: DateTime<Utc>,
     pub active: bool,
+}
+
+/// The kind of Minecraft account credentials are for.
+#[derive(
+    sqlx::Type, Deserialize, Serialize, Debug, Copy, Clone, PartialEq, Eq,
+)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(rename_all = "lowercase")]
+pub enum MinecraftAccountType {
+    Microsoft,
+    Offline,
+}
+
+/// Validates an offline-mode username, returning the trimmed name.
+///
+/// Offline usernames follow the same rules as Mojang usernames so that
+/// worlds, chat, and offline-mode (`online-mode=false`) servers behave:
+/// 3-16 characters of ASCII letters, digits, or underscores.
+pub fn validate_offline_username(name: &str) -> crate::Result<String> {
+    let trimmed = name.trim();
+    let valid = (3..=16).contains(&trimmed.len())
+        && trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+
+    if !valid {
+        return Err(crate::ErrorKind::InputError(format!(
+            "Invalid username {name:?}: use 3-16 letters, numbers, or underscores"
+        ))
+        .into());
+    }
+
+    Ok(trimmed.to_string())
+}
+
+/// Computes the vanilla offline-mode UUID for a (validated, trimmed) player
+/// name: MD5 of `OfflinePlayer:<name>` with v3/variant bits set.
+///
+/// This matches the vanilla launcher and PrismLauncher/MultiMC, so recreating
+/// the same name reproduces the same identity and worlds/saves are kept.
+pub fn offline_uuid(name: &str) -> Uuid {
+    let digest = md5::compute(format!("OfflinePlayer:{name}"));
+    let mut bytes = digest.0;
+    bytes[6] = (bytes[6] & 0x0f) | 0x30;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 /// An entry in the player profile cache, keyed by player UUID.
@@ -271,6 +321,12 @@ impl Credentials {
         &mut self,
         exec: impl sqlx::Executor<'_, Database = sqlx::Sqlite> + Copy,
     ) -> crate::Result<()> {
+        // Offline accounts have no tokens to refresh and must work with no
+        // network access at all.
+        if self.is_offline() {
+            return Ok(());
+        }
+
         // Use a margin of 5 minutes to give e.g. Minecraft and potentially
         // other operations that depend on a fresh token 5 minutes to complete
         // from now, and deal with some classes of clock skew
@@ -351,6 +407,12 @@ impl Credentials {
         &self,
         cache_intent: OnlineProfileCacheIntent,
     ) -> Option<Arc<MinecraftProfile>> {
+        // Offline accounts have no online profile; callers fall back to the
+        // stored offline profile via maybe_online_profile().
+        if self.is_offline() {
+            return None;
+        }
+
         let max_age = cache_intent.max_age();
         let stale_profile = {
             let mut profile_cache = PROFILE_CACHE.lock().await;
@@ -470,6 +532,11 @@ impl Credentials {
         let credentials = Self::get_active(exec).await?;
 
         if let Some(mut creds) = credentials {
+            // Offline accounts need no refresh and must work with no network.
+            if creds.is_offline() {
+                return Ok(Some(creds));
+            }
+
             let res = creds.refresh(exec).await;
 
             match res {
@@ -519,7 +586,7 @@ impl Credentials {
         let res = sqlx::query!(
             "
             SELECT
-                uuid, active, username, access_token, refresh_token, expires
+                uuid, active, username, access_token, refresh_token, expires, account_type AS 'account_type: MinecraftAccountType'
             FROM minecraft_users
             WHERE active = TRUE
             "
@@ -530,6 +597,7 @@ impl Credentials {
         Ok(match res {
             Some(x) => {
                 let mut credentials = Self {
+                    account_type: x.account_type,
                     offline_profile: MinecraftProfile {
                         id: Uuid::parse_str(&x.uuid).unwrap_or_default(),
                         name: x.username,
@@ -556,7 +624,7 @@ impl Credentials {
         let res = sqlx::query!(
             "
             SELECT
-                uuid, active, username, access_token, refresh_token, expires
+                uuid, active, username, access_token, refresh_token, expires, account_type AS 'account_type: MinecraftAccountType'
             FROM minecraft_users
             "
         )
@@ -564,6 +632,7 @@ impl Credentials {
         .try_fold(DashMap::new(), |acc, x| {
             let uuid = Uuid::parse_str(&x.uuid).unwrap_or_default();
             let mut credentials = Self {
+                account_type: x.account_type,
                 offline_profile: MinecraftProfile {
                     id: uuid,
                     name: x.username,
@@ -611,14 +680,15 @@ impl Credentials {
 
         sqlx::query!(
             "
-            INSERT INTO minecraft_users (uuid, active, username, access_token, refresh_token, expires)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO minecraft_users (uuid, active, username, access_token, refresh_token, expires, account_type)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (uuid) DO UPDATE SET
                 active = $2,
                 username = $3,
                 access_token = $4,
                 refresh_token = $5,
-                expires = $6
+                expires = $6,
+                account_type = $7
             ",
             uuid,
             self.active,
@@ -626,11 +696,159 @@ impl Credentials {
             self.access_token,
             self.refresh_token,
             expires,
+            self.account_type,
         )
             .execute(exec)
             .await?;
 
         Ok(())
+    }
+
+    /// Whether these credentials are for an offline account.
+    pub fn is_offline(&self) -> bool {
+        self.account_type == MinecraftAccountType::Offline
+    }
+
+    /// Checks whether a username (case-insensitive) or UUID is already taken
+    /// by an account other than `exclude`.
+    ///
+    /// Uses a direct query so offline account management never triggers token
+    /// refreshes or other network access.
+    async fn offline_identity_taken(
+        name: &str,
+        id: Uuid,
+        exclude: Option<Uuid>,
+        exec: impl sqlx::Executor<'_, Database = sqlx::Sqlite> + Copy,
+    ) -> crate::Result<bool> {
+        let rows = sqlx::query!(
+            "
+            SELECT uuid, username
+            FROM minecraft_users
+            "
+        )
+        .fetch_all(exec)
+        .await?;
+
+        Ok(rows.iter().any(|row| {
+            let row_uuid = Uuid::parse_str(&row.uuid).unwrap_or_default();
+            (row_uuid == id || row.username.eq_ignore_ascii_case(name))
+                && Some(row_uuid) != exclude
+        }))
+    }
+
+    /// Creates a new offline account with the given display name, makes it
+    /// the active account, and returns its credentials.
+    ///
+    /// The player UUID is derived deterministically from the name (see
+    /// [`offline_uuid`]), so re-adding a removed name restores its identity.
+    pub async fn create_offline_user(
+        name: &str,
+        exec: impl sqlx::Executor<'_, Database = sqlx::Sqlite> + Copy,
+    ) -> crate::Result<Self> {
+        let name = validate_offline_username(name)?;
+        let id = offline_uuid(&name);
+
+        if Self::offline_identity_taken(&name, id, None, exec).await? {
+            return Err(crate::ErrorKind::InputError(format!(
+                "An account named {name:?} already exists"
+            ))
+            .into());
+        }
+
+        let credentials = Self {
+            account_type: MinecraftAccountType::Offline,
+            offline_profile: MinecraftProfile {
+                id,
+                name,
+                ..MinecraftProfile::default()
+            },
+            access_token: String::new(),
+            refresh_token: String::new(),
+            expires: Utc.timestamp_opt(0, 0).single().unwrap_or_else(Utc::now),
+            active: true,
+        };
+        credentials.upsert(exec).await?;
+
+        Ok(credentials)
+    }
+
+    /// Renames an offline account. Renaming recomputes the deterministic
+    /// UUID, so the renamed account is a new identity (new worlds/saves).
+    pub async fn rename_offline_user(
+        uuid: Uuid,
+        new_name: &str,
+        exec: impl sqlx::Executor<'_, Database = sqlx::Sqlite> + Copy,
+    ) -> crate::Result<Self> {
+        let uuid_str = uuid.as_hyphenated().to_string();
+        let row = sqlx::query!(
+            "
+            SELECT
+                uuid, active, username, access_token, refresh_token, expires, account_type AS 'account_type: MinecraftAccountType'
+            FROM minecraft_users
+            WHERE uuid = $1
+            ",
+            uuid_str,
+        )
+        .fetch_optional(exec)
+        .await?
+        .ok_or_else(|| {
+            crate::ErrorKind::OtherError(format!(
+                "Tried to rename nonexistent user with ID {uuid}"
+            ))
+            .as_error()
+        })?;
+
+        let user = Self {
+            account_type: row.account_type,
+            offline_profile: MinecraftProfile {
+                id: Uuid::parse_str(&row.uuid).unwrap_or_default(),
+                name: row.username,
+                ..MinecraftProfile::default()
+            },
+            access_token: row.access_token,
+            refresh_token: row.refresh_token,
+            expires: Utc
+                .timestamp_opt(row.expires, 0)
+                .single()
+                .unwrap_or_else(Utc::now),
+            active: row.active == 1,
+        };
+
+        if !user.is_offline() {
+            return Err(crate::ErrorKind::InputError(
+                "Only offline accounts can be renamed".to_string(),
+            )
+            .into());
+        }
+
+        let was_active = user.active;
+        Self::remove(uuid, exec).await?;
+
+        let name = validate_offline_username(new_name)?;
+        let id = offline_uuid(&name);
+
+        if Self::offline_identity_taken(&name, id, None, exec).await? {
+            return Err(crate::ErrorKind::InputError(format!(
+                "An account named {name:?} already exists"
+            ))
+            .into());
+        }
+
+        let credentials = Self {
+            account_type: MinecraftAccountType::Offline,
+            offline_profile: MinecraftProfile {
+                id,
+                name,
+                ..MinecraftProfile::default()
+            },
+            access_token: String::new(),
+            refresh_token: String::new(),
+            expires: Utc.timestamp_opt(0, 0).single().unwrap_or_else(Utc::now),
+            active: was_active,
+        };
+        credentials.upsert(exec).await?;
+
+        Ok(credentials)
     }
 
     pub async fn remove(
@@ -682,7 +900,8 @@ impl Serialize for Credentials {
                 ),
         };
 
-        let mut ser = serializer.serialize_struct("Credentials", 5)?;
+        let mut ser = serializer.serialize_struct("Credentials", 6)?;
+        ser.serialize_field("account_type", &self.account_type)?;
         ser.serialize_field("profile", &*profile)?;
         ser.serialize_field("access_token", &self.access_token)?;
         ser.serialize_field("refresh_token", &self.refresh_token)?;
