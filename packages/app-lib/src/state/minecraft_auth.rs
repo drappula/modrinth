@@ -252,7 +252,8 @@ pub fn validate_offline_username(name: &str) -> crate::Result<String> {
 /// Computes the vanilla offline-mode UUID for a (validated, trimmed) player
 /// name: MD5 of `OfflinePlayer:<name>` with v3/variant bits set.
 ///
-/// This matches the vanilla launcher and PrismLauncher/MultiMC, so recreating
+/// This is Java's `UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(UTF_8))`,
+/// matching the vanilla launcher and PrismLauncher/MultiMC, so recreating
 /// the same name reproduces the same identity and worlds/saves are kept.
 pub fn offline_uuid(name: &str) -> Uuid {
     let digest = md5::compute(format!("OfflinePlayer:{name}"));
@@ -822,12 +823,11 @@ impl Credentials {
         }
 
         let was_active = user.active;
-        Self::remove(uuid, exec).await?;
 
         let name = validate_offline_username(new_name)?;
         let id = offline_uuid(&name);
 
-        if Self::offline_identity_taken(&name, id, None, exec).await? {
+        if Self::offline_identity_taken(&name, id, Some(uuid), exec).await? {
             return Err(crate::ErrorKind::InputError(format!(
                 "An account named {name:?} already exists"
             ))
@@ -846,7 +846,13 @@ impl Credentials {
             expires: Utc.timestamp_opt(0, 0).single().unwrap_or_else(Utc::now),
             active: was_active,
         };
+        // Insert the new identity before deleting the old one: a failure here
+        // leaves the original account untouched, and a crash between the two
+        // statements leaves a recoverable duplicate instead of data loss.
         credentials.upsert(exec).await?;
+        if id != uuid {
+            Self::remove(uuid, exec).await?;
+        }
 
         Ok(credentials)
     }

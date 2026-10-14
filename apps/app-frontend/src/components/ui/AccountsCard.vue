@@ -376,6 +376,8 @@ async function submitOfflineModal() {
 		trackEvent('AccountLogIn', { source: 'OfflineAccount' })
 	} catch (error) {
 		offlineError.value = error instanceof Error ? error.message : String(error)
+		// The account list may have changed (or not); show its true state.
+		await refreshValues().catch(handleError)
 	} finally {
 		offlineSaving.value = false
 	}
@@ -447,7 +449,7 @@ const messages = defineMessages({
 	renameOfflineNote: {
 		id: 'minecraft-account.rename-offline-note',
 		defaultMessage:
-			'Renaming creates a new identity with a different player UUID. Worlds and servers will treat it as a different player.',
+			'Renaming creates a new identity with a different player UUID — even changing only capitalization. Worlds and servers will treat it as a different player.',
 	},
 	cancel: {
 		id: 'minecraft-account.cancel',
